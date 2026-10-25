@@ -34,7 +34,7 @@ on:
         description: "Branch, tag or SHA in source_repo to verify"
         required: true
       gluten_cpp_tests:
-        description: "Gluten C++ tests: ctest -R regex, 'all', or empty to skip"
+        description: "Gluten C++ tests: space-separated exe[:gtest_filter] (e.g. runtime_test velox_memory_test:*Spill*), 'all' for ctest, or empty to skip"
         required: false
         default: ""
       velox_tests:
@@ -162,10 +162,26 @@ jobs:
           set -o pipefail
           cd cpp/build
           if [ "$IN_GLUTEN_CPP_TESTS" = "all" ]; then
-            ctest -V 2>&1 | tee "$GITHUB_WORKSPACE/results/gluten-ctest.log"
-          else
-            ctest -V -R "$IN_GLUTEN_CPP_TESTS" 2>&1 | tee "$GITHUB_WORKSPACE/results/gluten-ctest.log"
+            # Tests are registered via gtest_discover_tests; fail rather than pass on zero tests.
+            ctest -V --no-tests=error 2>&1 | tee "$GITHUB_WORKSPACE/results/gluten-ctest.log"
+            exit $?
           fi
+          status=0
+          for spec in $IN_GLUTEN_CPP_TESTS; do
+            exe="${spec%%:*}"
+            filter="*"
+            if [ "$spec" != "$exe" ]; then filter="${spec#*:}"; fi
+            if ! [[ "$exe" =~ ^[A-Za-z0-9_]+$ ]]; then echo "invalid test executable: $exe"; status=1; continue; fi
+            log="$GITHUB_WORKSPACE/results/gluten-$exe.log"
+            bin=$(find . -type f -name "$exe" -perm -u+x | head -1)
+            if [ -z "$bin" ]; then echo "test binary not found: $exe" | tee "$log"; status=1; continue; fi
+            "$bin" --gtest_filter="$filter" 2>&1 | tee "$log" || status=1
+            # A filter that matches nothing must not count as a pass.
+            if ! grep -qE '^\[  PASSED  \] [1-9][0-9]* test' "$log"; then
+              echo "no passing tests ran for $spec" | tee -a "$log"; status=1
+            fi
+          done
+          exit $status
 
       - name: Velox gtests (build only the requested targets)
         if: ${{ inputs.velox_tests != '' }}
@@ -189,6 +205,9 @@ jobs:
             bin=$(find "$BUILD_DIR" -type f -name "$target" -perm -u+x | head -1)
             if [ -z "$bin" ]; then echo "binary not found for $target" | tee "$log"; status=1; continue; fi
             "$bin" --gtest_filter="$filter" 2>&1 | tee "$log" || status=1
+            if ! grep -qE '^\[  PASSED  \] [1-9][0-9]* test' "$log"; then
+              echo "no passing tests ran for $spec" | tee -a "$log"; status=1
+            fi
           done
           exit $status
 
@@ -206,20 +225,29 @@ jobs:
             -pl "$IN_MAVEN_MODULES" -am \
             -DwildcardSuites="$IN_SCALA_SUITES" -Dtest=none -DfailIfNoTests=false \
             2>&1 | tee results/scala.log
+          # A wildcard that matches no suite still ends in BUILD SUCCESS; require real tests.
+          if ! sed 's/\x1b\[[0-9;]*m//g' results/scala.log | grep -qE 'Tests: succeeded [1-9]'; then
+            echo "no Scala tests ran for: $IN_SCALA_SUITES" | tee -a results/scala.log
+            exit 1
+          fi
 
       - name: Summary
         if: always()
         run: |
+          # Reporting only: never let a grep with no matches fail the run.
+          set +e +o pipefail
           {
             echo "## agent-verify: $IN_SOURCE_REPO@$IN_REF"
             echo '```'
             cat results/run-info.txt
             echo '```'
-            for f in results/gluten-ctest.log results/velox-*.log results/scala.log; do
+            for f in results/gluten-*.log results/velox-*.log results/scala.log; do
               [ -f "$f" ] || continue
               echo "### $(basename "$f")"
               echo '```'
-              grep -E "tests passed|tests failed|\[  PASSED  \]|\[  FAILED  \]|Tests: succeeded|\*\*\* FAILED|BUILD (SUCCESS|FAILURE)|Tests run:" "$f" | tail -25
+              sed 's/\x1b\[[0-9;]*m//g' "$f" \
+                | grep -E "tests passed|tests failed|No tests were found|\[  PASSED  \]|\[  FAILED  \]|no passing tests|not found|Tests: succeeded|no Scala tests|\*\*\* FAILED|BUILD (SUCCESS|FAILURE)|Tests run:" \
+                | tail -25
               echo '```'
             done
           } | tee results/summary.md >> "$GITHUB_STEP_SUMMARY"
