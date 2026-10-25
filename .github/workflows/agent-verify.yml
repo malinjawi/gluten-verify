@@ -49,6 +49,10 @@ on:
         description: "Maven -pl modules for the Scala suites"
         required: false
         default: "backends-velox"
+      maven_profiles:
+        description: "Extra Maven profiles for the Scala suites, comma-separated (e.g. delta or delta,iceberg)"
+        required: false
+        default: ""
       spark:
         description: "Spark profile"
         required: false
@@ -96,6 +100,7 @@ jobs:
       IN_VELOX_TESTS: ${{ inputs.velox_tests }}
       IN_SCALA_SUITES: ${{ inputs.scala_suites }}
       IN_MAVEN_MODULES: ${{ inputs.maven_modules }}
+      IN_MAVEN_PROFILES: ${{ inputs.maven_profiles }}
       IN_SPARK: ${{ inputs.spark }}
       IN_VELOX_REPO: ${{ inputs.velox_repo }}
       IN_VELOX_BRANCH: ${{ inputs.velox_branch }}
@@ -220,7 +225,14 @@ jobs:
             spark-4.*) JAVA_PROFILE="-Pjava-17"; SCALA_PROFILE="-Pscala-2.13" ;;
             spark-3.5) JAVA_PROFILE="-Pjava-17" ;;
           esac
-          $MVN_CMD test -P"$IN_SPARK" $SCALA_PROFILE $JAVA_PROFILE -Pbackends-velox \
+          EXTRA_PROFILES=()
+          if [ -n "$IN_MAVEN_PROFILES" ]; then
+            if ! [[ "$IN_MAVEN_PROFILES" =~ ^[A-Za-z0-9._,-]+$ ]]; then
+              echo "invalid maven_profiles: $IN_MAVEN_PROFILES"; exit 1
+            fi
+            EXTRA_PROFILES=("-P$IN_MAVEN_PROFILES")
+          fi
+          $MVN_CMD test -P"$IN_SPARK" $SCALA_PROFILE $JAVA_PROFILE -Pbackends-velox "${EXTRA_PROFILES[@]}" \
             -pl "$IN_MAVEN_MODULES" -am \
             -DwildcardSuites="$IN_SCALA_SUITES" -Dtest=none -DfailIfNoTests=false \
             2>&1 | tee results/scala.log
