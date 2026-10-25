@@ -112,6 +112,11 @@ jobs:
           repository: ${{ inputs.source_repo }}
           ref: ${{ inputs.ref }}
 
+      # This repo's helper scripts (checked out after the source so it isn't wiped).
+      - uses: actions/checkout@v4
+        with:
+          path: .agent-verify
+
       - name: Prepare results directory
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -175,11 +180,8 @@ jobs:
             log="$GITHUB_WORKSPACE/results/gluten-$exe.log"
             bin=$(find . -type f -name "$exe" -perm -u+x | head -1)
             if [ -z "$bin" ]; then echo "test binary not found: $exe" | tee "$log"; status=1; continue; fi
-            "$bin" --gtest_filter="$filter" 2>&1 | tee "$log" || status=1
-            # A filter that matches nothing must not count as a pass.
-            if ! grep -qE '^\[  PASSED  \] [1-9][0-9]* test' "$log"; then
-              echo "no passing tests ran for $spec" | tee -a "$log"; status=1
-            fi
+            # One process per test case, like ctest + gtest_discover_tests; fails on zero matches.
+            bash "$GITHUB_WORKSPACE/.agent-verify/scripts/run-gtests.sh" "$bin" "$filter" "$log" || status=1
           done
           exit $status
 
@@ -204,10 +206,7 @@ jobs:
             echo "::endgroup::"
             bin=$(find "$BUILD_DIR" -type f -name "$target" -perm -u+x | head -1)
             if [ -z "$bin" ]; then echo "binary not found for $target" | tee "$log"; status=1; continue; fi
-            "$bin" --gtest_filter="$filter" 2>&1 | tee "$log" || status=1
-            if ! grep -qE '^\[  PASSED  \] [1-9][0-9]* test' "$log"; then
-              echo "no passing tests ran for $spec" | tee -a "$log"; status=1
-            fi
+            bash "$GITHUB_WORKSPACE/.agent-verify/scripts/run-gtests.sh" "$bin" "$filter" "$log" || status=1
           done
           exit $status
 
@@ -246,7 +245,7 @@ jobs:
               echo "### $(basename "$f")"
               echo '```'
               sed 's/\x1b\[[0-9;]*m//g' "$f" \
-                | grep -E "tests passed|tests failed|No tests were found|\[  PASSED  \]|\[  FAILED  \]|no passing tests|not found|Tests: succeeded|no Scala tests|\*\*\* FAILED|BUILD (SUCCESS|FAILURE)|Tests run:" \
+                | grep -E "gtest-isolated:|tests passed|tests failed|No tests were found|not found|Tests: succeeded|no Scala tests|\*\*\* FAILED|BUILD (SUCCESS|FAILURE)|Tests run:" \
                 | tail -25
               echo '```'
             done
